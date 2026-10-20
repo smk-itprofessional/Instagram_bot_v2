@@ -1,0 +1,30 @@
+niche: "daily motivation"
+handle: "@mydaily.rise"
+
+themes:
+  - "hot-air balloon over mountains"
+  - "lighthouse on cliffs"
+  - "desert caravan at dawn"
+  - "snowy pine forest trail"
+  - "ocean wave at sunrise"
+  - "city rooftop at dusk"
+  - "waterfall in jungle"
+  - "wheat field under storm sky"
+  - "northern lights over lake"
+  - "old bridge in mist"
+  - "sailboat on open sea"
+  - "mountain lake reflection"
+  - "canyon at golden hour"
+  - "cherry blossom path"
+  - "volcano under stars"
+
+width: 1080
+height: 1350
+image_prompt_template: "cinematic motivational {theme}, {niche}, ultra detailed, vibrant, inspiring atmosphere, no text watermark"
+caption_template: "{quote}\n\nDay {day_of_year}/365 ✨\n{hashtags}"
+hashtags:
+  - "#motivation"
+  - "#mindset"
+  - "#dreambig"
+  - "#discipline"
+  - "#journey"
