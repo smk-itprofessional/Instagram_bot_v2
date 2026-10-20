@@ -34,7 +34,7 @@ jobs:
       IG_API_VERSION: v26.0
       # Mark this run so caption shows [DEV] and you can tell it apart on IG.
       # Set to 'false' if you truly want byte-identical posts.
-      DEV_PREFIX: "true"
+      DEV_PREFIX: "false"
     steps:
       - name: Checkout develop code
         uses: actions/checkout@v4
