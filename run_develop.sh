@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-BRANCH="main"
+BRANCH="develop"
 echo "== fetching $BRANCH =="
 git fetch origin "$BRANCH" >/dev/null 2>&1 || true
 git worktree list | grep -q "wt-develop" || git worktree add ./wt-develop origin/$BRANCH 2>/dev/null || git worktree add ./wt-develop $BRANCH 2>/dev/null || true
