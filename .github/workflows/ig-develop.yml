@@ -1,0 +1,73 @@
+name: IG develop daily (same secrets, alongside main)
+
+# Runs ALONGSIDE your existing main scheduler, using the SAME secrets.
+# GitHub `schedule` runs from the DEFAULT branch, so this file must live on `main`.
+# It checks out `develop` code explicitly — main's workflow is untouched.
+
+on:
+  schedule:
+    # SAME cadence as main, but offset +10 min to avoid racing the same IG account.
+    # If main is "0 3 * * *" UTC, keep this at "10 3 * * *" UTC.
+    # Change to match your main workflow's cron:
+    - cron: "10 3 * * *"
+  workflow_dispatch: {}
+  push:
+    branches: [develop]
+    paths:
+      - "auto_post.py"
+      - "config.yaml"
+      - ".github/workflows/ig-develop.yml"
+
+concurrency:
+  group: ig-develop
+  cancel-in-progress: false
+
+jobs:
+  post-develop:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Kolkata
+      # SAME secrets as main scheduler:
+      IG_USER_ID: ${{ secrets.IG_USER_ID }}
+      IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+      IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+      IG_API_VERSION: v26.0
+      # Mark this run so caption shows [DEV] and you can tell it apart on IG.
+      # Set to 'false' if you truly want byte-identical posts.
+      DEV_PREFIX: "true"
+    steps:
+      - name: Checkout develop code
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Verify 365-day uniqueness
+        run: python3 auto_post.py --verify-365 $(date +%Y)
+
+      - name: Run develop poster (same secrets, alongside main)
+        run: |
+          if [ "$DEV_PREFIX" = "true" ]; then
+            # prefix caption so DEV post is distinguishable on the same IG account
+            export CAPTION_PREFIX="[DEV] "
+          fi
+          python3 auto_post.py
+
+      - name: Upload develop artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: develop-post-${{ github.run_number }}
+          path: |
+            output/post-*.jpg
+            output/caption-*.txt
+            output/preview.html
+            output/posted.log
+          if-no-files-found: warn
