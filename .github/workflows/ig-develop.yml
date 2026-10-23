@@ -11,12 +11,12 @@ on:
     # Change to match your main workflow's cron:
     - cron: "15 2 * * *"
   workflow_dispatch: {}
-  push:
-    branches: [main]
-    paths:
-      - "auto_post.py"
-      - "config.yaml"
-      - ".github/workflows/ig-develop.yml"
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - "auto_post.py"
+  #     - "config.yaml"
+  #     - ".github/workflows/ig-develop.yml"
 
 concurrency:
   group: ig-develop
