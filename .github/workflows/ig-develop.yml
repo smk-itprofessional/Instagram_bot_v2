@@ -9,10 +9,10 @@ on:
     # SAME cadence as main, but offset +10 min to avoid racing the same IG account.
     # If main is "0 3 * * *" UTC, keep this at "10 3 * * *" UTC.
     # Change to match your main workflow's cron:
-    - cron: "10 3 * * *"
+    - cron: "15 2 * * *"
   workflow_dispatch: {}
   push:
-    branches: [develop]
+    branches: [main]
     paths:
       - "auto_post.py"
       - "config.yaml"
@@ -36,10 +36,10 @@ jobs:
       # Set to 'false' if you truly want byte-identical posts.
       DEV_PREFIX: "false"
     steps:
-      - name: Checkout develop code
+      - name: Checkout main code
         uses: actions/checkout@v4
         with:
-          ref: develop
+          ref: main
 
       - name: Setup Python
         uses: actions/setup-python@v5
