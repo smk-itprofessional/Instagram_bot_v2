@@ -243,109 +243,16 @@ def build_caption(cfg, quote, day_of_year, ctx=None):
         cap = f"{prefix} {cap}" if prefix.endswith("]") else f"{prefix}{cap}"
     return cap
 
-def _is_ig_fetchable(url: str) -> bool:
-    """IG needs: https + image extension + 200 + Content-Type: image/*.
-
-    Simulates the IG crawler. Used to reject viewer-pages / blocked hosts
-    BEFORE calling the Graph API (avoids 9004 / 2207052).
-    """
-    try:
-        if not url.startswith("https://"):
-            return False
-        # IG requires the URL to look like a file
-        if not url.split("?")[0].lower().endswith((".jpg", ".jpeg", ".png")):
-            print(f"[upload-check] reject (no image ext): {url}")
-            return False
-        UA = {"User-Agent": "facebookexternalhit/1.1"}
-        r = requests.head(url, headers=UA, timeout=20, allow_redirects=True)
-        ctype = r.headers.get("Content-Type", "")
-        ok = r.status_code == 200 and "image" in ctype
-        print(f"[upload-check] {url} -> {r.status_code} {ctype} {'OK' if ok else 'FAIL'}")
-        if not ok:
-            # HEAD sometimes lies, confirm with GET
-            r2 = requests.get(url, headers=UA, timeout=20, stream=True)
-            ctype2 = r2.headers.get("Content-Type", "")
-            ok = r2.status_code == 200 and "image" in ctype2
-            print(f"[upload-check-retry] {r2.status_code} {ctype2} {'OK' if ok else 'FAIL'}")
-            try:
-                r2.close()
-            except Exception:
-                pass
-        return ok
-    except Exception as e:
-        print(f"[upload-check] {url} FAIL: {e}")
-        return False
-
-
-def _imgbb_direct(j: dict) -> str:
-    """Prefer true raw file, NOT viewer page.
-    ImgBB: data.image.url > data.display_url > data.url (viewer page last).
-    """
-    d = j.get("data") or {}
-    return (
-        (d.get("image") or {}).get("url")
-        or d.get("display_url")
-        or d.get("url")
-        or ""
-    )
-
 def upload_public(image_path: pathlib.Path) -> str:
-    """Instagram API needs a PUBLIC image URL that the IG crawler can fetch.
-
-    FIX for 9004/2207052 "Only photo or video can be accepted":
-    - old code trusted first upload success (imgbb i.ibb.co) even when IG
-      gets HTML/blocked response instead of image bytes.
-    - new code verifies each URL as IG would (facebookexternalhit + image
-      Content-Type) and only returns a VERIFIED url.
-    Order: catbox (files.catbox.moe, most IG-compatible) -> 0x0.st ->
-           imgbb-direct -> litterbox 72h -> uguu -> tmpfiles.
+    """Instagram API needs a PUBLIC image URL.
+    Order: IMGBB (free key, most reliable from GitHub) -> litterbox -> tmpfiles -> uguu -> catbox -> 0x0
     """
     UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
-    candidates = []
 
-    def try_upload(name, fn):
-        try:
-            url = fn()
-            url = (url or "").strip()
-            print(f"[upload] {name} returned: {url}")
-            if url.startswith("https://"):
-                if _is_ig_fetchable(url):
-                    print(f"[upload] {name} VERIFIED: {url}")
-                    return url
-                candidates.append(url)
-            else:
-                print(f"[upload] {name} bad response: {url[:200]}")
-        except Exception as e:
-            print(f"[upload] {name} failed: {e}")
-        return None
-
-    # 1) catbox permanent — most IG-compatible (returns https://files.catbox.moe/xxx.jpg)
-    def _catbox():
-        with open(image_path, "rb") as f:
-            r = requests.post("https://catbox.moe/user/api.php",
-                              data={"reqtype": "fileupload"},
-                              files={"fileToUpload": (image_path.name, f, "image/jpeg")},
-                              headers=UA, timeout=60)
-        r.raise_for_status()
-        return r.text.strip()
-    hit = try_upload("catbox", _catbox)
-    if hit:
-        return hit
-
-    # 2) 0x0.st — raw bytes, correct Content-Type
-    def _zx():
-        with open(image_path, "rb") as f:
-            r = requests.post("https://0x0.st", files={"file": f}, headers=UA, timeout=60)
-        r.raise_for_status()
-        return r.text.strip()
-    hit = try_upload("0x0.st", _zx)
-    if hit:
-        return hit
-
-    # 3) ImgBB — free key from https://api.imgbb.com/, add as secret IMGBB_API_KEY
+    # 1) ImgBB — free key from https://api.imgbb.com/ (1 min signup), add as GitHub Secret IMGBB_API_KEY
     ibkey = os.getenv("IMGBB_API_KEY", "").strip()
     if ibkey:
-        def _ib():
+        try:
             import base64
             with open(image_path, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode()
@@ -353,42 +260,33 @@ def upload_public(image_path: pathlib.Path) -> str:
                               data={"key": ibkey, "image": b64, "name": image_path.stem},
                               headers=UA, timeout=60)
             r.raise_for_status()
-            return _imgbb_direct(r.json())
-        hit = try_upload("imgbb", _ib)
-        if hit:
-            return hit
-    else:
-        print("[upload] imgbb skipped (no IMGBB_API_KEY)")
+            j = r.json()
+            url = (j.get("data") or {}).get("url") or (j.get("data") or {}).get("display_url")
+            if url and url.startswith("https://"):
+                print(f"[upload] imgbb: {url}")
+                return url
+            print(f"[upload] imgbb bad response: {str(j)[:300]}")
+        except Exception as e:
+            print(f"[upload] imgbb failed: {e}")
 
-    # 4) litterbox (catbox temp host, 72h)
-    def _litter():
+    # 2) litterbox (catbox temp host, 72h — often works when catbox.moe blocks servers)
+    try:
         with open(image_path, "rb") as f:
             r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
                               data={"reqtype": "fileupload", "time": "72h"},
                               files={"fileToUpload": (image_path.name, f, "image/jpeg")},
                               headers=UA, timeout=60)
         r.raise_for_status()
-        return r.text.strip()
-    hit = try_upload("litterbox", _litter)
-    if hit:
-        return hit
+        url = r.text.strip()
+        if url.startswith("https://"):
+            print(f"[upload] litterbox: {url}")
+            return url
+        print(f"[upload] litterbox bad response: {url[:200]}")
+    except Exception as e:
+        print(f"[upload] litterbox failed: {e}")
 
-    # 5) uguu.se — keyless
-    def _uguu():
-        with open(image_path, "rb") as f:
-            r = requests.post("https://uguu.se/upload.php",
-                              files={"files[]": (image_path.name, f, "image/jpeg")},
-                              headers=UA, timeout=60)
-        r.raise_for_status()
-        j = r.json()
-        files = j.get("files") or []
-        return files[0].get("url") if files else ""
-    hit = try_upload("uguu", _uguu)
-    if hit:
-        return hit
-
-    # 6) tmpfiles.org — keyless, often NOT IG-fetchable, last resort only
-    def _tmp():
+    # 3) tmpfiles.org — keyless, server-friendly
+    try:
         with open(image_path, "rb") as f:
             r = requests.post("https://tmpfiles.org/api/v1/upload",
                               files={"file": (image_path.name, f, "image/jpeg")},
@@ -397,17 +295,55 @@ def upload_public(image_path: pathlib.Path) -> str:
         j = r.json()
         url = (j.get("data") or {}).get("url", "")
         if url.startswith("https://tmpfiles.org/"):
-            return url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
-        return url
-    hit = try_upload("tmpfiles", _tmp)
-    if hit:
-        return hit
+            direct = url.replace("https://tmpfiles.org/", "https://tmpfiles.org/dl/")
+            print(f"[upload] tmpfiles: {direct}")
+            return direct
+        print(f"[upload] tmpfiles bad response: {str(j)[:300]}")
+    except Exception as e:
+        print(f"[upload] tmpfiles failed: {e}")
 
-    if candidates:
-        # last resort: return first candidate even if check failed (old behavior)
-        print(f"[upload] WARNING: no URL passed IG-check, using {candidates[0]} anyway (likely 9004)")
-        return candidates[0]
-    raise RuntimeError("All free uploads failed/uncrawlable. FIX: check network + set IMGBB_API_KEY (https://api.imgbb.com/). Test URL with: curl -I -A 'facebookexternalhit/1.1' <url>")
+    # 4) uguu.se — keyless
+    try:
+        with open(image_path, "rb") as f:
+            r = requests.post("https://uguu.se/upload.php",
+                              files={"files[]": (image_path.name, f, "image/jpeg")},
+                              headers=UA, timeout=60)
+        r.raise_for_status()
+        j = r.json()
+        files = j.get("files") or []
+        url = files[0].get("url") if files else ""
+        if url and url.startswith("https://"):
+            print(f"[upload] uguu: {url}")
+            return url
+        print(f"[upload] uguu bad response: {r.text[:300]}")
+    except Exception as e:
+        print(f"[upload] uguu failed: {e}")
+
+    # 5) legacy hosts
+    for host in ["catbox", "0x0"]:
+        try:
+            if host == "catbox":
+                with open(image_path, "rb") as f:
+                    r = requests.post("https://catbox.moe/user/api.php",
+                                      data={"reqtype": "fileupload", "time": "72h"},
+                                      files={"fileToUpload": (image_path.name, f, "image/jpeg")},
+                                      headers=UA, timeout=60)
+                r.raise_for_status()
+                url = r.text.strip()
+                if url.startswith("https://"):
+                    print(f"[upload] catbox: {url}")
+                    return url
+            else:
+                with open(image_path, "rb") as f:
+                    r = requests.post("https://0x0.st", files={"file": f}, headers=UA, timeout=60)
+                r.raise_for_status()
+                url = r.text.strip()
+                if url.startswith("https://"):
+                    print(f"[upload] 0x0.st: {url}")
+                    return url
+        except Exception as e:
+            print(f"[upload] {host} failed: {e}")
+    raise RuntimeError("All free uploads failed. FIX: add free IMGBB_API_KEY secret (https://api.imgbb.com/) — most reliable from GitHub.")
 
 def ig_publish(image_url: str, caption: str, ig_user_id: str, token: str):
     # 1. create container
@@ -540,7 +476,7 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
         footer_h = int(W * 0.030 * 1.6)
         y0 = H - int(H * 0.06) - footer_h - block_h - int(W * 0.10)
         # accent line
-        draw.rectangle([margin, y0 - int(W * 0.025), margin + int(W * 0.025) + int(W * 0.14) - int(W * 0.025), y0 - int(W * 0.025) + 5], fill=accent)
+        draw.rectangle([margin, y0 - int(W * 0.025), margin + int(W * 0.14), y0 - int(W * 0.025) + 5], fill=accent)
         try:
             draw.text((margin, y0 - int(W * 0.105)), "\u201c", font=mark_font, fill=accent)
         except Exception:
@@ -637,12 +573,6 @@ def main():
 
     print("[live] uploading + publishing to Instagram...")
     public_url = os.getenv("IMAGE_URL_OVERRIDE", "").strip() or upload_public(image_path)
-    # Fail fast with clear message instead of cryptic 9004
-    if not _is_ig_fetchable(public_url):
-        raise RuntimeError(
-            f"Image URL not fetchable by IG crawler (will cause 9004): {public_url}. "
-            "Check host allows facebookexternalhit + returns image/jpeg."
-        )
     media_id = ig_publish(public_url, caption, ig_id, token)
     # log
     with open(OUT / "posted.log", "a", encoding="utf-8") as f:
