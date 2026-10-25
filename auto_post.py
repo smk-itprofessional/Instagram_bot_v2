@@ -1,15 +1,17 @@
+01M5SZNCX48S3Z3YYWXJ6F1PH8-ig_poster.py
+28 KB
+
+
 """
-Instagram Auto-Poster — daily 1 post, 100% free stack (develop: 365-day unique).
+Instagram Auto-Poster — daily 1 post, 100% free stack (pillar-aware: 365-day unique).
 
 Flow:
-  1. Pick today's theme (deterministic 365-day plan, no repeat within a year)
-  2. Generate image with FREE model: Pollinations.ai / Flux (no API key)
-  3. Generate quote/caption with FREE model: Pollinations text (no API key)
-  4. If IG creds present -> upload image to public URL + publish via Graph API
-     Else -> DRY-RUN: save to output/ for preview (works immediately, zero setup)
-
-Env (see .env.example):
-  IG_USER_ID, IG_ACCESS_TOKEN, DRY_RUN (auto=true if creds missing)
+  1. Load Day N entry from quotes_365.json -> {quote, pillar}
+  2. Pick today's theme DETERMINISTIC, with mood = pillar (no repeat image combo within a year)
+  3. Generate image with FREE model: Pollinations.ai / Flux (no API key)
+  4. Caption = quote + pillar hashtag
+  5. If IG creds present -> upload + publish via Graph API
+     Else -> DRY-RUN: save to output/
 """
 import os, sys, random, datetime, time, urllib.parse, pathlib, json
 import requests
@@ -35,14 +37,13 @@ FALLBACK_QUOTES = [
     "Hard times build strong minds.",
 ]
 
-# ---- 365-day unique engine (deterministic, no repeats within a year) ----
 _BG = [
     "misty mountains", "golden desert", "emerald forest", "arctic aurora",
     "tropical coast", "monsoon valley", "alpine peak", "red canyon",
     "lavender field", "starry night desert", "autumn highlands", "turquoise lagoon",
 ]
 _LIGHT = ["sunrise glow", "golden hour", "blue hour", "starlight", "soft morning mist"]
-_MOOD = [
+_MOOD_FALLBACK = [
     "journey", "courage", "new beginning", "perseverance", "gratitude",
     "focus", "hope", "discipline", "freedom", "resilience",
 ]
@@ -51,7 +52,10 @@ _MOOD = [
 def _combo_pool(subjects, year):
     """Cartesian pool shuffled deterministically by year. len >> 365."""
     from itertools import product
-    pool = list(product(subjects, _BG, _LIGHT, _MOOD))
+    # NOTE: mood excluded from pool now — mood comes from pillar (JSON).
+    # subject x background x lighting still >> 365 (e.g. 5x12x5=300, 10x12x5=600)
+    # If subjects list is small, pool is extended by index repetition (see pick_theme).
+    pool = list(product(subjects, _BG, _LIGHT))
     rng = random.Random(f"ig-365-{year}")
     rng.shuffle(pool)
     return pool
@@ -74,9 +78,6 @@ def unique_fallback_quote(subject, background, lighting, mood, doy, year):
         "rise slow, shine far",
     ]
     lesson = lessons[(h // 13) % len(lessons)]
-    # Every template embeds subject+background+lighting+mood so that
-    # unique theme => unique quote. Day is in template 3; others carry
-    # lighting+mood which together with subject+background is unique.
     tpls = [
         f"A {subject} over {background} at {lighting} reminds you: {lesson} [{mood}].",
         f"{lesson.capitalize()}, like a {subject} over {background} [{lighting} • {mood}].",
@@ -94,21 +95,66 @@ def today_seed():
     d = datetime.date.today()
     return d.timetuple().tm_yday, d.isoformat()
 
-def pick_theme(cfg, for_date=None):
-    """Deterministic 365-day unique theme.
-    Returns (theme, seed, day_of_year, datestr, ctx) where ctx has
-    subject/background/lighting/mood/year for image+quote builders.
-    Same date -> same result; different dates in same year -> different."""
+# ---- PILLAR-AWARE 365 engine ----
+def load_365_quotes():
+    """Load quotes_365.json (Day 1..365). Returns {day:int -> {quote:str, pillar:str}}."""
+    p = ROOT / "quotes_365.json"
+    try:
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        items = data.get("quotes") if isinstance(data, dict) else data
+        out = {}
+        for x in items:
+            try:
+                d = int(x.get("day"))
+            except Exception:
+                continue
+            q = (x.get("quote") or "").strip()
+            pillar = (x.get("pillar") or "").strip().lower()
+            if q:
+                out[d] = {"quote": q, "pillar": pillar}
+        return out
+    except Exception as e:
+        print(f"[quotes] could not load quotes_365.json: {e}")
+        return {}
+
+
+def get_day_entry(bank, doy):
+    """Day-of-year -> bank entry. Leap Dec 31 (366) reuses Day 365."""
+    if not bank:
+        return None
+    key = doy if doy in bank else ((doy - 1) % 365) + 1
+    return bank.get(key)
+
+
+def pick_theme(cfg, for_date=None, pillar_override=None):
+    """Deterministic 365-day unique theme, PILLAR-AWARE.
+    mood = pillar from JSON (if given), else fallback pool mood.
+    Returns (theme, seed, day_of_year, datestr, ctx).
+    Same date -> same result; different dates in same year -> different combo.
+    """
     d = for_date or datetime.date.today()
     day_of_year = d.timetuple().tm_yday
     datestr = d.isoformat()
     subjects = cfg.get("themes", ["inspiration"]) or ["inspiration"]
     pool = _combo_pool(subjects, d.year)
-    subject, background, lighting, mood = pool[(day_of_year - 1) % len(pool)]
+    # pool is (subject, background, lighting); cycle with stride so small
+    # subject lists still give unique triples across 365 days
+    subject, background, lighting = pool[(day_of_year - 1) % len(pool)]
+    if len(pool) < 365:
+        # extend uniqueness with deterministic background variant index
+        variant = ((day_of_year - 1) // max(len(pool), 1)) + 1
+        if variant > 1:
+            background = f"{background} variant {variant}"
+    if pillar_override:
+        mood = pillar_override.strip().lower()
+    else:
+        mood = _MOOD_FALLBACK[(day_of_year - 1) % len(_MOOD_FALLBACK)]
     theme = f"{subject}, {background}, {lighting}, {mood}"
     seed = int(d.strftime("%Y%m%d"))
     ctx = {"subject": subject, "background": background, "lighting": lighting,
-           "mood": mood, "year": d.year, "doy": day_of_year, "date": datestr}
+           "mood": mood, "pillar": mood, "year": d.year, "doy": day_of_year, "date": datestr}
     return theme, seed, day_of_year, datestr, ctx
 
 def gen_image(cfg, theme, seed, ctx=None):
@@ -119,33 +165,34 @@ def gen_image(cfg, theme, seed, ctx=None):
     doy = ctx.get("doy", "?")
     year = ctx.get("year", "")
     mood = ctx.get("mood", "")
-    # Build base prompt tolerantly (template may only have {theme}/{niche})
+    pillar = ctx.get("pillar", mood)
     try:
         prompt = tpl.format(theme=theme, niche=niche, day_of_year=doy,
                             date=ctx.get("date", ""), background=ctx.get("background", ""),
-                            lighting=ctx.get("lighting", ""), mood=mood, year=year)
+                            lighting=ctx.get("lighting", ""), mood=mood, pillar=pillar, year=year)
     except KeyError:
         prompt = tpl.replace("{theme}", theme).replace("{niche}", niche)
-    # Force uniqueness even if template ignores extra fields
-    uniq = f", unique scene day {doy}/365 {year} {mood}".strip()
+    # Force uniqueness + pillar grounding even if template ignores extra fields
+    uniq = f", unique scene day {doy}/365 {year} {pillar}".strip()
     if uniq not in prompt:
         prompt = f"{prompt}{uniq}"
+    # Ground visual mood in pillar
+    if pillar and pillar.lower() not in prompt.lower():
+        prompt = f"{prompt}, {pillar} mood"
     q = urllib.parse.quote(prompt)
     url = f"https://image.pollinations.ai/prompt/{q}?width={w}&height={h}&seed={seed}&model=flux&nologo=true"
-    print(f"[image] FREE model request: {prompt[:90]}...")
+    print(f"[image] FREE model request: {prompt[:120]}... (pillar={pillar})")
     r = requests.get(url, timeout=120)
     r.raise_for_status()
     ctype = r.headers.get("Content-Type", "")
     if "image" not in ctype and len(r.content) < 20000:
         raise RuntimeError(f"Image model returned non-image: {r.text[:300]}")
     p = OUT / f"post-{datetime.date.today().isoformat()}.jpg"
-    # Normalize to exact IG size (crop-fit) so API never rejects aspect ratio
     try:
         from PIL import Image
         import io as _io
         im = Image.open(_io.BytesIO(r.content)).convert("RGB")
         tw, th = w, h
-        # cover-fit: scale then center-crop
         s = max(tw / im.width, th / im.height)
         im = im.resize((int(im.width * s + 0.5), int(im.height * s + 0.5)))
         x = (im.width - tw) // 2; y = (im.height - th) // 2
@@ -156,33 +203,24 @@ def gen_image(cfg, theme, seed, ctx=None):
     print(f"[image] saved {p} ({p.stat().st_size//1024} KB)")
     return p, prompt
 
-def load_365_quotes():
-    """Load quotes_365.json (Day 1..365) if present. Returns {day:int -> quote:str}."""
-    p = ROOT / "quotes_365.json"
-    try:
-        if not p.exists():
-            return {}
-        data = json.loads(p.read_text(encoding="utf-8"))
-        items = data.get("quotes") if isinstance(data, dict) else data
-        return {int(x.get("day")): x.get("quote", "").strip() for x in items if x.get("quote")}
-    except Exception as e:
-        print(f"[quotes] could not load quotes_365.json: {e}")
-        return {}
-
-
 def gen_quote(cfg, theme, ctx=None):
-    """365 strong quotes file first (QUOTE_SOURCE=file, default), live model optional."""
+    """365 strong quotes file first (QUOTE_SOURCE=file, default), live model optional.
+    PILLAR-AWARE: returns (quote, pillar). ctx['pillar'] is set when bank hits.
+    """
     ctx = ctx or {}
     doy = ctx.get("doy")
     year = ctx.get("year")
     source = os.getenv("QUOTE_SOURCE", "file").lower()
     if source in ("file", "365", "curated") and doy:
         bank = load_365_quotes()
-        # day-of-year maps directly; leap Dec 31 (366) reuses Day 365 bank entry
-        q = bank.get(doy) or bank.get(((doy - 1) % 365) + 1)
-        if q:
-            print(f"[text] 365-bank Day {doy}: {q}")
-            return q
+        entry = get_day_entry(bank, doy)
+        if entry:
+            q, pillar = entry["quote"], entry.get("pillar", "")
+            if pillar:
+                ctx["pillar"] = pillar
+                ctx["mood"] = pillar  # keep image/caption in sync
+            print(f"[text] 365-bank Day {doy} [{pillar}]: {q}")
+            return q, pillar
         print("[text] quotes_365.json missing, falling back.")
     prompt = f"Write ONE short original motivational quote (max 20 words) about: {theme}. No hashtags, no quotes around it, just the quote."
     try:
@@ -190,23 +228,23 @@ def gen_quote(cfg, theme, ctx=None):
         r = requests.get(url, timeout=60, headers={"Accept": "text/plain"})
         r.raise_for_status()
         q = r.text.strip().strip('"').strip()
-        # guard against long/error responses
         if 5 < len(q) < 300 and "pollinations" not in q.lower():
-            # Dedup guard: if this exact quote was already posted this year, vary it
             if doy and year and _quote_already_used(q, year):
                 q = f"{q} [Day {doy}/365]"
             print(f"[text] FREE model quote: {q}")
-            return q
+            pillar = ctx.get("pillar", "")
+            return q, pillar
         raise ValueError("bad response, using fallback")
     except Exception as e:
         print(f"[text] model unavailable ({e}), using unique fallback quote.")
+        pillar = ctx.get("pillar", ctx.get("mood", ""))
         if doy and year:
             return unique_fallback_quote(ctx.get("subject", theme),
                                           ctx.get("background", ""),
                                           ctx.get("lighting", ""),
-                                          ctx.get("mood", ""), doy, year)
+                                          ctx.get("mood", ""), doy, year), pillar
         random.seed(datetime.date.today().strftime("%Y%m%d"))
-        return random.choice(FALLBACK_QUOTES)
+        return random.choice(FALLBACK_QUOTES), pillar
 
 
 def _quote_already_used(quote, year):
@@ -228,16 +266,24 @@ def _quote_already_used(quote, year):
     return False
 
 def build_caption(cfg, quote, day_of_year, ctx=None):
+    ctx = ctx or {}
     tags = " ".join(cfg.get("hashtags", []))
-    # Always append unique day tag so captions can never repeat within a year
+    # Always append unique day tag + pillar tag so captions never repeat
     day_tag = f"#day{day_of_year}"
     if day_tag not in tags:
         tags = (tags + f" {day_tag}").strip()
-    tpl = cfg.get("caption_template", "{quote}\n{hashtags}")
-    cap = tpl.format(quote=quote, hashtags=tags,
-                      day_of_year=day_of_year,
-                      date=(ctx or {}).get("date", datetime.date.today().isoformat()))
-    # Optional prefix for develop runs on the SAME IG account (env CAPTION_PREFIX="[DEV] ")
+    pillar = (ctx.get("pillar") or ctx.get("mood") or "").strip().lower().replace(" ", "")
+    if pillar:
+        ptag = f"#{pillar}"
+        if ptag not in tags.lower():
+            tags = (tags + f" {ptag}").strip()
+    tpl = cfg.get("caption_template", "{quote}\n{hashtags}\n{pillar}")
+    try:
+        cap = tpl.format(quote=quote, hashtags=tags, pillar=pillar,
+                         day_of_year=day_of_year,
+                         date=ctx.get("date", datetime.date.today().isoformat()))
+    except KeyError:
+        cap = f"{quote}\n{tags}"
     prefix = os.getenv("CAPTION_PREFIX", "").strip()
     if prefix and not cap.startswith(prefix):
         cap = f"{prefix} {cap}" if prefix.endswith("]") else f"{prefix}{cap}"
@@ -245,11 +291,9 @@ def build_caption(cfg, quote, day_of_year, ctx=None):
 
 def upload_public(image_path: pathlib.Path) -> str:
     """Instagram API needs a PUBLIC image URL.
-    Order: IMGBB (free key, most reliable from GitHub) -> litterbox -> tmpfiles -> uguu -> catbox -> 0x0
+    Order: IMGBB -> litterbox -> tmpfiles -> uguu -> catbox -> 0x0
     """
     UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
-
-    # 1) ImgBB — free key from https://api.imgbb.com/ (1 min signup), add as GitHub Secret IMGBB_API_KEY
     ibkey = os.getenv("IMGBB_API_KEY", "").strip()
     if ibkey:
         try:
@@ -268,8 +312,6 @@ def upload_public(image_path: pathlib.Path) -> str:
             print(f"[upload] imgbb bad response: {str(j)[:300]}")
         except Exception as e:
             print(f"[upload] imgbb failed: {e}")
-
-    # 2) litterbox (catbox temp host, 72h — often works when catbox.moe blocks servers)
     try:
         with open(image_path, "rb") as f:
             r = requests.post("https://litterbox.catbox.moe/resources/internals/api.php",
@@ -284,8 +326,6 @@ def upload_public(image_path: pathlib.Path) -> str:
         print(f"[upload] litterbox bad response: {url[:200]}")
     except Exception as e:
         print(f"[upload] litterbox failed: {e}")
-
-    # 3) tmpfiles.org — keyless, server-friendly
     try:
         with open(image_path, "rb") as f:
             r = requests.post("https://tmpfiles.org/api/v1/upload",
@@ -301,8 +341,6 @@ def upload_public(image_path: pathlib.Path) -> str:
         print(f"[upload] tmpfiles bad response: {str(j)[:300]}")
     except Exception as e:
         print(f"[upload] tmpfiles failed: {e}")
-
-    # 4) uguu.se — keyless
     try:
         with open(image_path, "rb") as f:
             r = requests.post("https://uguu.se/upload.php",
@@ -318,8 +356,6 @@ def upload_public(image_path: pathlib.Path) -> str:
         print(f"[upload] uguu bad response: {r.text[:300]}")
     except Exception as e:
         print(f"[upload] uguu failed: {e}")
-
-    # 5) legacy hosts
     for host in ["catbox", "0x0"]:
         try:
             if host == "catbox":
@@ -346,7 +382,6 @@ def upload_public(image_path: pathlib.Path) -> str:
     raise RuntimeError("All free uploads failed. FIX: add free IMGBB_API_KEY secret (https://api.imgbb.com/) — most reliable from GitHub.")
 
 def ig_publish(image_url: str, caption: str, ig_user_id: str, token: str):
-    # 1. create container
     r = requests.post(f"{BASE}/{ig_user_id}/media",
                       data={"image_url": image_url, "caption": caption,
                             "access_token": token}, timeout=60)
@@ -358,7 +393,6 @@ def ig_publish(image_url: str, caption: str, ig_user_id: str, token: str):
         raise RuntimeError(f"IG container error: {j}")
     creation_id = j["id"]
     print(f"[ig] container {creation_id} created, waiting for processing...")
-    # 2. wait until READY (IG processes image async)
     for i in range(12):
         time.sleep(10)
         st = requests.get(f"{BASE}/{creation_id}",
@@ -370,7 +404,6 @@ def ig_publish(image_url: str, caption: str, ig_user_id: str, token: str):
             break
         if code == "ERROR":
             raise RuntimeError(f"IG media processing failed: {st}")
-    # 3. publish
     r2 = requests.post(f"{BASE}/{ig_user_id}/media_publish",
                        data={"creation_id": creation_id, "access_token": token}, timeout=60)
     j2 = r2.json()
@@ -389,9 +422,7 @@ def write_preview(caption, image_path):
     (OUT / "preview.html").write_text(html, encoding="utf-8")
 
 def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=None) -> pathlib.Path:
-    """Burn the quote onto the image with clean IG formatting (PIL only, offline).
-    Returns image_path (overwritten in place). Disable with QUOTE_ON_IMAGE=false.
-    """
+    """Burn the quote onto the image with clean IG formatting (PIL only, offline)."""
     if os.getenv("QUOTE_ON_IMAGE", "true").lower() in ("0", "false", "no", "off"):
         return image_path
     try:
@@ -404,13 +435,11 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
         ctx = ctx or {}
         cfg = cfg or {}
         doy = ctx.get("doy", datetime.date.today().timetuple().tm_yday)
-        mood = (ctx.get("mood", "") or "").upper()
-        handle = cfg.get("handle", "")  # optional e.g. "@mydaily.rise" in config.yaml
+        mood = (ctx.get("pillar") or ctx.get("mood") or "").upper()
+        handle = cfg.get("handle", "")
         footer = f"DAY {doy}/365" + (f"  •  {mood}" if mood else "") + (f"  •  {handle}" if handle else "")
-
         im = Image.open(image_path).convert("RGB")
         W, H = im.size
-        # --- bottom gradient scrim for readability ---
         scrim_h = int(H * 0.52)
         scrim = Image.new("L", (1, scrim_h), 0)
         for y in range(scrim_h):
@@ -418,7 +447,6 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
         scrim = scrim.resize((W, scrim_h))
         black = Image.new("RGB", (W, scrim_h), (0, 0, 0))
         im.paste(Image.composite(black, im.crop((0, H - scrim_h, W, H)), scrim), (0, H - scrim_h))
-
         draw = ImageDraw.Draw(im)
 
         def _font(bold, size):
@@ -429,7 +457,6 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
                 f"/usr/share/fonts/truetype/liberation/LiberationSans{'-Bold' if bold else '-Regular'}.ttf",
                 f"/usr/share/fonts/truetype/noto/NotoSans{'-Bold' if bold else '-Regular'}.ttf",
             ]
-            # any Sans bold/regular as last resort (offline runners vary)
             try:
                 extra = sorted(glob.glob("/usr/share/fonts/**/*.ttf", recursive=True))
                 pref = [p for p in extra if ("Bold" if bold else "Regular") in p and ("Sans" in p or "Noto" in p or "Liber" in p)]
@@ -443,7 +470,6 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
                     continue
             return ImageFont.load_default()
 
-        # --- fit quote size (size-based wrap, works even with fallback font) ---
         margin = int(W * 0.08)
         max_w = W - 2 * margin
         qsize = int(W * 0.057)
@@ -454,7 +480,6 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
             for para in quote.split("\n"):
                 wrapped += textwrap.wrap(para, width=chars) or [""]
             qfont = _font(True, qsize)
-            # refine with real measurement when a scalable font loaded
             try:
                 real_w = max(draw.textlength(l, font=qfont) for l in wrapped) if wrapped else 0
                 if real_w > max_w and qsize > 34:
@@ -468,14 +493,11 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
             qsize -= 6
         lh = int(qsize * 1.32)
         block_h = lh * len(wrapped)
-        # opening “ mark
         mark_font = _font(True, int(W * 0.12))
         accent = (255, 209, 102)
-        # --- layout: quote block above footer ---
         footer_font = _font(False, int(W * 0.030))
         footer_h = int(W * 0.030 * 1.6)
         y0 = H - int(H * 0.06) - footer_h - block_h - int(W * 0.10)
-        # accent line
         draw.rectangle([margin, y0 - int(W * 0.025), margin + int(W * 0.14), y0 - int(W * 0.025) + 5], fill=accent)
         try:
             draw.text((margin, y0 - int(W * 0.105)), "\u201c", font=mark_font, fill=accent)
@@ -483,16 +505,14 @@ def render_quote_overlay(image_path: pathlib.Path, quote: str, ctx=None, cfg=Non
             pass
         y = y0
         for line in wrapped:
-            # shadow then white text for pop on any background
             draw.text((margin + 2, y + 2), line, font=qfont, fill=(0, 0, 0))
             draw.text((margin, y), line, font=qfont, fill=(255, 255, 255))
             y += lh
-        # footer
         fy = H - int(H * 0.055)
         draw.text((margin + 1, fy + 1), footer, font=footer_font, fill=(0, 0, 0))
         draw.text((margin, fy), footer, font=footer_font, fill=(240, 240, 240))
         im.save(image_path, "JPEG", quality=92)
-        print(f"[overlay] quote burned onto {image_path.name} ({len(wrapped)} lines, size {qsize})")
+        print(f"[overlay] quote burned onto {image_path.name} ({len(wrapped)} lines, size {qsize}) pillar={mood}")
         return image_path
     except Exception as e:
         print(f"[overlay] failed ({e}), posting clean background image.")
@@ -514,41 +534,62 @@ def validate_token(token):
 
 
 def verify_365(cfg, year):
-    """Offline check: 365 days must give 365 unique themes/quotes/captions/prompts."""
+    """Offline check: 365 days must give 365 unique themes/quotes/captions/prompts (pillar-aware)."""
     seen_t, seen_q, seen_c, seen_p = set(), set(), set(), set()
+    pillars_used = set()
     n = 366 if (year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)) else 365
+    bank = load_365_quotes()
     d = datetime.date(year, 1, 1)
     for _ in range(n):
-        theme, seed, doy, ds, ctx = pick_theme(cfg, for_date=d)
+        entry = get_day_entry(bank, d.timetuple().tm_yday)
+        pillar = (entry.get("pillar") if entry else "") or _MOOD_FALLBACK[(d.timetuple().tm_yday - 1) % len(_MOOD_FALLBACK)]
+        theme, seed, doy, ds, ctx = pick_theme(cfg, for_date=d, pillar_override=pillar)
+        pillars_used.add(pillar)
         tpl = cfg.get("image_prompt_template", "{theme}")
         try:
             base = tpl.format(theme=theme, niche=cfg.get("niche", ""),
                               day_of_year=doy, date=ds, background=ctx["background"],
-                              lighting=ctx["lighting"], mood=ctx["mood"], year=year)
+                              lighting=ctx["lighting"], mood=ctx["mood"],
+                              pillar=ctx["pillar"], year=year)
         except KeyError:
             base = tpl.replace("{theme}", theme)
-        img_prompt = f"{base}, unique scene day {doy}/365 {year} {ctx['mood']}"
-        q = unique_fallback_quote(ctx["subject"], ctx["background"],
-                                  ctx["lighting"], ctx["mood"], doy, year)
-        tags = " ".join(cfg.get("hashtags", [])) + f" #day{doy}"
-        cap = cfg.get("caption_template", "{quote}\n{hashtags}").format(
-            quote=q, hashtags=tags, day_of_year=doy, date=ds)
+        img_prompt = f"{base}, unique scene day {doy}/365 {year} {ctx['pillar']}"
+        q = entry["quote"] if entry else unique_fallback_quote(
+            ctx["subject"], ctx["background"], ctx["lighting"], ctx["mood"], doy, year)
+        tags = " ".join(cfg.get("hashtags", [])) + f" #day{doy} #{pillar}"
+        cap = cfg.get("caption_template", "{quote}\n{hashtags}\n{pillar}").format(
+            quote=q, hashtags=tags, pillar=pillar, day_of_year=doy, date=ds)
         seen_t.add(theme); seen_q.add(q); seen_c.add(cap); seen_p.add(img_prompt)
         d += datetime.timedelta(days=1)
     return {"days": n, "unique_themes": len(seen_t), "unique_quotes": len(seen_q),
             "unique_captions": len(seen_c), "unique_image_prompts": len(seen_p),
+            "pillars": sorted(pillars_used),
             "all_unique": len(seen_t) == len(seen_q) == len(seen_c) == len(seen_p) == n}
 
 
 def main():
     if "--verify-365" in sys.argv:
         cfg = load_config()
-        year = int(sys.argv[sys.argv.index("--verify-365") + 1]) if len(sys.argv) > 2 else datetime.date.today().year
+        idx = sys.argv.index("--verify-365")
+        year = int(sys.argv[idx + 1]) if len(sys.argv) > idx + 1 and sys.argv[idx + 1].isdigit() else datetime.date.today().year
         res = verify_365(cfg, year)
         print(res)
         return 0 if res["all_unique"] else 1
     cfg = load_config()
-    theme, seed, day_of_year, datestr, ctx = pick_theme(cfg)
+
+    # 1) PILLAR FIRST: load today's quote entry to drive theme/image/caption
+    bank = load_365_quotes()
+    today = datetime.date.today()
+    doy_now = today.timetuple().tm_yday
+    entry = get_day_entry(bank, doy_now)
+    pillar_today = (entry.get("pillar") if entry else "") or ""
+    if pillar_today:
+        print(f"[pillar] Day {doy_now} pillar from JSON: {pillar_today}")
+    else:
+        print(f"[pillar] WARNING: no pillar found for Day {doy_now}, using fallback mood")
+
+    theme, seed, day_of_year, datestr, ctx = pick_theme(cfg, pillar_override=pillar_today or None)
+    # gen_quote re-syncs ctx pillar from bank (authoritative)
     print(f"=== IG auto-post {datestr} | theme: {theme} ===")
     print(f"[365] Day {day_of_year} ctx={ctx}")
 
@@ -556,16 +597,21 @@ def main():
     token = os.getenv("IG_ACCESS_TOKEN", "").strip()
     dry = os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes") or not (ig_id and token)
     if not dry:
-        validate_token(token)  # fail fast before image generation/upload
+        validate_token(token)
 
     image_path, used_prompt = gen_image(cfg, theme, seed, ctx)
-    quote = gen_quote(cfg, theme, ctx)
+    quote, pillar = gen_quote(cfg, theme, ctx)
+    # ensure ctx carries final pillar for caption/overlay/log
+    if pillar:
+        ctx["pillar"] = pillar
+        ctx["mood"] = pillar
     image_path = render_quote_overlay(image_path, quote, ctx, cfg)
     caption = build_caption(cfg, quote, day_of_year, ctx)
     write_preview(caption, image_path)
 
     if dry:
         print("\n--- DRY-RUN (no IG creds) ---")
+        print(f"[pillar={ctx.get('pillar')}] {quote}")
         print(caption)
         print(f"\nPreview: output/preview.html + {image_path.name}")
         print("To go live: fill IG_USER_ID + IG_ACCESS_TOKEN (see SETUP.md), then DRY_RUN=false")
@@ -574,9 +620,9 @@ def main():
     print("[live] uploading + publishing to Instagram...")
     public_url = os.getenv("IMAGE_URL_OVERRIDE", "").strip() or upload_public(image_path)
     media_id = ig_publish(public_url, caption, ig_id, token)
-    # log
     with open(OUT / "posted.log", "a", encoding="utf-8") as f:
-        f.write(json.dumps({"date": datestr, "theme": theme, "quote": quote,
+        f.write(json.dumps({"date": datestr, "theme": theme, "pillar": ctx.get("pillar"),
+                            "quote": quote, "caption": caption,
                             "image_url": public_url, "media_id": media_id}) + "\n")
     return 0
 
