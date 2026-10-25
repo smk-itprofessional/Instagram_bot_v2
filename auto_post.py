@@ -1,7 +1,3 @@
-01M5SZNCX48S3Z3YYWXJ6F1PH8-ig_poster.py
-28 KB
-
-
 """
 Instagram Auto-Poster — daily 1 post, 100% free stack (pillar-aware: 365-day unique).
 
@@ -266,17 +262,48 @@ def _quote_already_used(quote, year):
     return False
 
 def build_caption(cfg, quote, day_of_year, ctx=None):
+    """Viral hashtag switcher: base + pillar-specific + rotating viral + day tag.
+    Keeps 10-12 tags max, deterministic rotation to avoid shadowban."""
+    import random as _random
     ctx = ctx or {}
-    tags = " ".join(cfg.get("hashtags", []))
-    # Always append unique day tag + pillar tag so captions never repeat
-    day_tag = f"#day{day_of_year}"
-    if day_tag not in tags:
-        tags = (tags + f" {day_tag}").strip()
     pillar = (ctx.get("pillar") or ctx.get("mood") or "").strip().lower().replace(" ", "")
-    if pillar:
-        ptag = f"#{pillar}"
-        if ptag not in tags.lower():
-            tags = (tags + f" {ptag}").strip()
+    base = list(cfg.get("base_hashtags", cfg.get("hashtags", [])))
+    pillar_map = cfg.get("pillar_hashtags", {}) or {}
+    # 1) pillar tags (2-3 of them, deterministic by day so same pillar varies)
+    ptags = list(pillar_map.get(pillar, [])) if pillar else []
+    if ptags:
+        _random.Random(f"pillar-{pillar}-{day_of_year}").shuffle(ptags)
+        ptags = ptags[:3]
+    # 2) viral rotating pool (5 per post, deterministic — never same set 2 days in a row)
+    pool = list(cfg.get("viral_pool", []))
+    n_viral = int(cfg.get("viral_per_post", 5))
+    vtags = []
+    if pool:
+        _random.Random(f"viral-{ctx.get('year', '')}-{day_of_year}").shuffle(pool)
+        vtags = pool[:n_viral]
+    # 3) keyword bonus from quote text (adds 1 niche tag when matched)
+    ql = quote.lower()
+    keyword_tags = {
+        "fear": "#fearless", "anxiet": "#anxietyrelief", "money": "#moneymindset",
+        "funds": "#moneymindset", "morning": "#morningmotivation", "night": "#nightthoughts",
+        "fail": "#failforward", "trust": "#trusttheprocess", "god": "#faith", "pray": "#faith",
+        "habit": "#habits", "gym": "#gymmotivation", "workout": "#gymmotivation",
+        "focus": "#focus", "dream": "#dreambig", "thank": "#gratitude",
+    }
+    bonus = []
+    for kw, tag in keyword_tags.items():
+        if kw in ql and tag not in ptags and tag not in vtags:
+            bonus.append(tag)
+            break  # max 1 bonus to stay under limit
+    # 4) assemble: base + pillar + viral + bonus + day tag, deduped, max 12
+    tags_list = []
+    for t in base + ptags + vtags + bonus + [f"#day{day_of_year}"]:
+        tl = t.lower()
+        if tl not in [x.lower() for x in tags_list]:
+            tags_list.append(t)
+    tags_list = tags_list[:12]
+    tags = " ".join(tags_list)
+    print(f"[hashtags] pillar={pillar} -> {tags}")
     tpl = cfg.get("caption_template", "{quote}\n{hashtags}\n{pillar}")
     try:
         cap = tpl.format(quote=quote, hashtags=tags, pillar=pillar,
@@ -556,9 +583,7 @@ def verify_365(cfg, year):
         img_prompt = f"{base}, unique scene day {doy}/365 {year} {ctx['pillar']}"
         q = entry["quote"] if entry else unique_fallback_quote(
             ctx["subject"], ctx["background"], ctx["lighting"], ctx["mood"], doy, year)
-        tags = " ".join(cfg.get("hashtags", [])) + f" #day{doy} #{pillar}"
-        cap = cfg.get("caption_template", "{quote}\n{hashtags}\n{pillar}").format(
-            quote=q, hashtags=tags, pillar=pillar, day_of_year=doy, date=ds)
+        cap = build_caption(cfg, q, doy, ctx)
         seen_t.add(theme); seen_q.add(q); seen_c.add(cap); seen_p.add(img_prompt)
         d += datetime.timedelta(days=1)
     return {"days": n, "unique_themes": len(seen_t), "unique_quotes": len(seen_q),
